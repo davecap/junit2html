@@ -2,7 +2,9 @@
 Handle multiple parsed junit reports
 """
 from __future__ import unicode_literals
+
 import os
+import re
 from junit2htmlreport import parser
 from junit2htmlreport.parser import SKIPPED, FAILED, PASSED, ABSENT
 
@@ -12,24 +14,35 @@ PARTIAL_FAIL = "partial failure"
 TOTAL_FAIL = "total failure"
 
 
+def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in _nsre.split(s)]
+
+
 class ReportMatrix(object):
     """
     Load and handle several report files
     """
 
-    def __init__(self):
+    def __init__(self, prop_prefix=None, prop_count=0):
         self.reports = {}
         self.cases = {}
         self.classes = {}
         self.casenames = {}
         self.result_stats = {}
-        self.requirements = {}
+        self.properties = {}
+
+        # Set up all properties in advance,
+        # so we can tell which ones have tests, and which dont.
+        if prop_prefix and prop_count:
+            for i in range(1, prop_count + 1):
+                self.properties[prop_prefix + str(i)] = []
 
     def report_order(self):
         return sorted(self.reports.keys())
 
-    def requirement_order(self):
-        return sorted(self.requirements.keys())
+    def property_order(self):
+        return sorted(self.properties.keys(), key=natural_sort_key)
 
     def short_outcome(self, outcome):
         if outcome == PASSED:
@@ -85,12 +98,15 @@ class ReportMatrix(object):
 
                     # For each SRS ID, add a column
                     for prop in testcase.properties:
-                        if prop.name == "srs_id":
-                            if prop.value not in self.requirements:
-                                self.requirements[prop.value] = []
-                            self.requirements[prop.value].append(testcase)
-                            self.cases[testclass][basename][prop.value] = testcase
+                        # Assuming ALL properties are relevant
+                        if prop.value not in self.properties:
+                            print("WARNING: Ignoring unrecognized property: {}"
+                                  .format(prop.value))
+                            continue
 
+                        self.properties[prop.value].append(testcase)
+                        self.cases[testclass][basename][prop.value] \
+                            = testcase
 
     def summary(self):
         """
@@ -124,8 +140,9 @@ class HtmlReportMatrix(ReportMatrix, parser.HtmlHeadMixin):
     Render a matrix report as html
     """
 
-    def __init__(self, outdir):
-        super(HtmlReportMatrix, self).__init__()
+    def __init__(self, outdir, prop_prefix, prop_count):
+        super(HtmlReportMatrix, self).__init__(
+            prop_prefix=prop_prefix, prop_count=prop_count)
         self.outdir = outdir
 
     def add_report(self, filename):
@@ -162,74 +179,27 @@ class HtmlReportMatrix(ReportMatrix, parser.HtmlHeadMixin):
         Render the html
         :return:
         """
-        output = self.get_html_head("")
-        output += "<body>"
-        output += "<h2>Reports Matrix</h2><hr size='1'/>"
 
-        # table headers,
-        #
-        #          report 1
-        #          |  report 2
-        #          |  |  report 3
-        #          |  |  |
-        #   test1  f  /  s  % Partial Failure
-        #   test2  s  /  -  % Partial Pass
-        #   test3  /  /  /  * Pass
-        output += "<table class='test-matrix'>"
-
-        # def make_underskip(length):
-        #     return "<td align='middle'>&#124;</td>" * length
-
-        spansize = 1 + len(self.requirements)
-        report_headers = 0
-
-        shown_stats = False
-
-        stats = self.get_stats_table()
-        output += "<tr>"
-
-        for axis in self.requirement_order():
-            label = axis
-            if label.endswith(".xml"):
-                label = label[:-4]
-            # underskip = make_underskip(report_headers)
-
-            # header = "<td colspan='{}'><pre>{}</pre></td>".format(spansize,
-            #                                                       label)
-            header = "<td colspan='1'><pre>{}</pre></td>".format(label)
-            spansize -= 1
-            report_headers += 1
-            first_cell = ""
-            if not shown_stats:
-                # insert the stats table
-                first_cell = "<td>{}</td>".format(
-                    stats
-                )
-                output += first_cell
-                shown_stats = True
-
-            output += header
-
-        # output += "<tr><td></td>{}</tr>".format(
-        #     make_underskip(len(self.requirements)))
-        output += "</tr>"
+        # Keep track of whether each property had a successful test
+        property_class = {}
 
         # iterate each class
+        output = ''
         for classname in self.classes:
             # new class
-            output += "<tr class='testclass'><td colspan='{}'>{}</td></tr>\n".format(
-                len(self.requirements) + 2,
-                classname)
+            output += "<tr class='testclass'><td colspan='{}'>{}</td></tr>\n"\
+                .format(len(self.properties) + 3, classname)
 
             # print the case name
             for casename in sorted(set(self.casenames[classname])):
-                output += "<tr class='testcase'><td width='16'>{}</td>".format(casename)
+                output += "<tr class='testcase'><td width='16'>{}</td>"\
+                    .format(casename)
 
                 case_results = []
 
                 # print each test and its result for each axis
                 celltds = ""
-                for axis in self.requirement_order():
+                for axis in self.property_order():
                     cellclass = ABSENT
                     anchor = None
                     if axis not in self.cases[classname][casename]:
@@ -257,6 +227,9 @@ class HtmlReportMatrix(ReportMatrix, parser.HtmlHeadMixin):
                         cellclass,
                         cell)
 
+                    if property_class.get(axis) in [None, ABSENT]:
+                        property_class[axis] = cellclass
+
                 combined_name = self.combined_result(case_results)[1]
 
                 output += celltds
@@ -268,7 +241,63 @@ class HtmlReportMatrix(ReportMatrix, parser.HtmlHeadMixin):
         output += "</table>"
         output += "</body>"
         output += "</html>"
-        return output
+
+        # Header is done AFTER the body, in order to highlight properties
+        # that have passing tests.
+        header = self.get_html_head("")
+        header += "<body>"
+        header += "<h2>Reports Matrix</h2><hr size='1'/>"
+
+        # table headers,
+        #
+        #          report 1
+        #          |  report 2
+        #          |  |  report 3
+        #          |  |  |
+        #   test1  f  /  s  % Partial Failure
+        #   test2  s  /  -  % Partial Pass
+        #   test3  /  /  /  * Pass
+        header += "<table class='test-matrix'>"
+
+        # def make_underskip(length):
+        #     return "<td align='middle'>&#124;</td>" * length
+
+        spansize = 1 + len(self.properties)
+        report_headers = 0
+
+        shown_stats = False
+
+        stats = self.get_stats_table()
+        header += "<tr>"
+
+        for axis in self.property_order():
+            label = axis
+            if label.endswith(".xml"):
+                label = label[:-4]
+            # underskip = make_underskip(report_headers)
+
+            # header = "<td colspan='{}'><pre>{}</pre></td>".format(spansize,
+            #                                                       label)
+            cell = "<td class='{}' colspan='1'><pre>{}</pre></td>"\
+                .format(property_class.get(label, 'absent'), label)
+
+            spansize -= 1
+            report_headers += 1
+            first_cell = ""
+            if not shown_stats:
+                # insert the stats table
+                first_cell = "<td>{}</td>".format(
+                    stats
+                )
+                header += first_cell
+                shown_stats = True
+
+            header += cell
+
+        # output += "<tr><td></td>{}</tr>".format(
+        #     make_underskip(len(self.properties)))
+        header += "</tr>"
+        return header + output
 
 
 class TextReportMatrix(ReportMatrix):
@@ -297,7 +326,7 @@ class TextReportMatrix(ReportMatrix):
 
         # render the axis headings in a stepped tree
         treelines = ""
-        for filename in self.requirement_order():
+        for filename in self.property_order():
             output += "{}    {}{}\n".format(" " * left_indent, treelines,
                                             filename)
             treelines += "| "
@@ -310,13 +339,13 @@ class TextReportMatrix(ReportMatrix):
 
             # print the case name
             for casename in sorted(set(self.casenames[classname])):
-                output += "- {}{}  ".format(casename,
-                                            " " * (left_indent - len(casename)))
+                output += "- {}{}  ".format(
+                    casename, " " * (left_indent - len(casename)))
 
                 # print each test and its result for each axis
                 case_data = ""
                 case_results = []
-                for axis in self.requirement_order():
+                for axis in self.property_order():
                     if axis not in self.cases[classname][casename]:
                         case_data += "  "
                     else:

@@ -21,6 +21,14 @@ PARSER.add_option("--merge", dest="merge_output", type=str,
                   metavar="NEWREPORT",
                   help="Merge multiple test results into one file")
 
+PARSER.add_option("--prop-name", dest="matrix_prop_name", type=str,
+                  metavar="PROPNAME",
+                  help="The name of the property used for the trace matrix")
+
+PARSER.add_option("--prop-count", dest="matrix_prop_count", type=str,
+                  metavar="PROPCOUNT",
+                  help="The total number of unique properties for the trace matrix")
+
 
 def run(args):
     """
@@ -47,7 +55,10 @@ def run(args):
             tmatrix.add_report(filename)
         print(tmatrix.summary())
     elif opts.html_matrix:
-        hmatrix = matrix.HtmlReportMatrix(os.path.dirname(opts.html_matrix))
+        prop_name = opts.matrix_prop_name
+        prop_count = opts.matrix_prop_count or 0
+        hmatrix = matrix.HtmlReportMatrix(
+            os.path.dirname(opts.html_matrix), prop_name, int(prop_count))
         for filename in args:
             hmatrix.add_report(filename)
         with open(opts.html_matrix, "w") as outfile:
